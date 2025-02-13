@@ -79,14 +79,22 @@ public class GameBoard {
     public String attackPosition(String position) {
         int[] coords = convertPosition(position);
         if (coords == null) return "Invalid position!";
-
+        
+        // If this cell was already attacked, report it.
+        char cell = board[coords[0]][coords[1]];
+        if (cell == 'X' || cell == 'M') {
+            return "Position already attacked!";
+        }
+        
+        // Check if any ship occupies this position.
         for (Ship ship : ships) {
             if (ship.containsPosition(position)) {
                 board[coords[0]][coords[1]] = 'X';
-                return ship.registerHit(position);
+                String result = ship.registerHit(position);
+                return result;
             }
         }
-
+        
         board[coords[0]][coords[1]] = 'M';
         return "Miss!";
     }
@@ -94,4 +102,22 @@ public class GameBoard {
     public boolean allShipsSunk() {
         return ships.stream().allMatch(Ship::isSunk);
     }
+    
+    // Getter for the board array so the GUI can update its display.
+    public char[][] getBoard() {
+        return board;
+    }
+    
+    public int getRows() {
+        return rows;
+    }
+    
+    public int getCols() {
+        return cols;
+    }
+
+    public List<Ship> getShips() {
+        return ships;
+    }
+    
 }

@@ -23,7 +23,7 @@ public abstract class Ship {
     public static boolean isValidPlacement(List<String> positions, int shipSize) {
         if (positions.size() != shipSize) return false;
         
-        // Check if positions are in a straight line
+        // Check if positions are in a straight line.
         boolean isHorizontal = true;
         boolean isVertical = true;
         
@@ -64,4 +64,9 @@ public abstract class Ship {
     public boolean containsPosition(String position) {
         return positions.contains(position);
     }
+
+    public List<String> getPositions() {
+        return positions;
+    }
+    
 }

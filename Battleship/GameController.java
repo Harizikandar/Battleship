@@ -1,71 +1,73 @@
 import java.util.Arrays;
 import java.util.List;
-import java.util.Scanner;
+import java.util.ArrayList;
+import java.util.Random;
 
 public class GameController {
-    private GameBoard player1Board;
-    private GameBoard player2Board;
-    private boolean player1Turn;
-    private Scanner scanner;
+    private GameBoard playerBoard; // Human player's board
+    private GameBoard enemyBoard;  // Computer's board
+    private Random random;
 
     public GameController() {
-        this.player1Board = new GameBoard(10, 10);
-        this.player2Board = new GameBoard(10, 10);
-        this.player1Turn = true;
-        this.scanner = new Scanner(System.in);
+        playerBoard = new GameBoard(10, 10);
+        enemyBoard = new GameBoard(10, 10);
+        random = new Random();
+        autoSetupPhase();
     }
 
-    public void startGame() {
-        setupPhase();
-        playPhase();
-        scanner.close();
+    // Automatically place ships on both boards using fixed positions.
+    private void autoSetupPhase() {
+        // For player's board:
+        List<String> pBattleship = Arrays.asList("A1", "A2", "A3", "A4");
+        List<String> pDestroyer = Arrays.asList("C1", "C2", "C3");
+        List<String> pSubmarine = Arrays.asList("E1", "E2");
+        playerBoard.placeShip(new Battleship(), pBattleship);
+        playerBoard.placeShip(new Destroyer(), pDestroyer);
+        playerBoard.placeShip(new Submarine(), pSubmarine);
+        
+        // For enemy (computer) board:
+        List<String> eBattleship = Arrays.asList("J7", "J8", "J9", "J10");
+        List<String> eDestroyer = Arrays.asList("F5", "F6", "F7");
+        List<String> eSubmarine = Arrays.asList("H3", "H4");
+        enemyBoard.placeShip(new Battleship(), eBattleship);
+        enemyBoard.placeShip(new Destroyer(), eDestroyer);
+        enemyBoard.placeShip(new Submarine(), eSubmarine);
     }
 
-    private void setupPhase() {
-        System.out.println("PLAYER 1: Place your ships.");
-        player1Board.displayBoard(true);
-        setupPlayerShips(player1Board);
-
-        System.out.println("\nPLAYER 2: Place your ships.");
-        player2Board.displayBoard(true);
-        setupPlayerShips(player2Board);
+    // Process the player's attack on the enemy board.
+    public String playerAttack(String position) {
+        return enemyBoard.attackPosition(position);
     }
 
-    private void setupPlayerShips(GameBoard board) {
-        Ship[] ships = { new Battleship(), new Destroyer(), new Submarine() };
-        for (Ship ship : ships) {
-            while (true) {
-                System.out.println("Enter positions for " + ship.getName() + " (size " + ship.getSize() + "): ");
-                List<String> positions = Arrays.asList(scanner.nextLine().trim().split("\\s+"));
-                if (Ship.isValidPlacement(positions, ship.getSize()) && board.placeShip(ship, positions)) {
-                    break;
+    // The computer selects a random available position on the player's board and attacks.
+    public String computerAttack() {
+        List<String> availablePositions = new ArrayList<>();
+        for (int row = 0; row < playerBoard.getRows(); row++) {
+            for (int col = 0; col < playerBoard.getCols(); col++) {
+                char cell = playerBoard.getBoard()[row][col];
+                if (cell != 'X' && cell != 'M') {
+                    String pos = "" + (char)('A' + col) + (row + 1);
+                    availablePositions.add(pos);
                 }
-                System.out.println("Invalid placement! Try again.");
             }
         }
+        if (availablePositions.isEmpty()) return "No available moves!";
+        String pos = availablePositions.get(random.nextInt(availablePositions.size()));
+        String result = playerBoard.attackPosition(pos);
+        System.out.println("Computer attacks " + pos + ": " + result);
+        return result;
     }
 
-    private void playPhase() {
-        while (true) {
-            System.out.println("\n--- " + (player1Turn ? "PLAYER 1's Turn" : "PLAYER 2's Turn") + " ---");
-            GameBoard targetBoard = player1Turn ? player2Board : player1Board;
-            targetBoard.displayBoard(false);
-
-            String result = playerTurn(targetBoard);
-            System.out.println(result);
-
-            if (targetBoard.allShipsSunk()) {
-                System.out.println("Game Over! " + (player1Turn ? "PLAYER 1 WINS!" : "PLAYER 2 WINS!"));
-                break;
-            }
-
-            player1Turn = !player1Turn;
-        }
+    public GameBoard getPlayerBoard() {
+        return playerBoard;
     }
 
-    private String playerTurn(GameBoard targetBoard) {
-        System.out.println("Enter attack position (e.g., A5): ");
-        String attackPos = scanner.nextLine().trim().toUpperCase();
-        return targetBoard.attackPosition(attackPos);
+    public GameBoard getEnemyBoard() {
+        return enemyBoard;
+    }
+    
+    // Checks whether either side has lost all ships.
+    public boolean isGameOver() {
+        return playerBoard.allShipsSunk() || enemyBoard.allShipsSunk();
     }
 }
