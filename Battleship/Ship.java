@@ -69,4 +69,10 @@ public abstract class Ship {
         return positions;
     }
     
+    public List<String> getHitPositions() {
+        return hitPositions;
+    }
+
+    
+    
 }

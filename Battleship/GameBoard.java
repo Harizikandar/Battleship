@@ -39,6 +39,35 @@ public class GameBoard {
             System.out.println();
         }
     }
+    
+    // New method: displays board and extra stats.
+    // New method: displays board and extra stats in one line.
+public void displayBoardWithStats(boolean hideShips, int moveCount) {
+    // First, display the board as usual.
+    displayBoard(hideShips);
+    
+    // Count hits (cells marked 'X').
+    int hitCount = 0;
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            if (board[i][j] == 'X') {
+                hitCount++;
+            }
+        }
+    }
+    
+    // Count sunk ships.
+    int sunkCount = 0;
+    for (Ship ship : ships) {
+        if (ship.isSunk()) {
+            sunkCount++;
+        }
+    }
+    
+    // Print the stats in one line.
+    System.out.println("Moves : " + moveCount + "\tHit : " + hitCount + "\tSunk : " + sunkCount);
+}
+
 
     public boolean placeShip(Ship ship, List<String> positions) {
         if (!isPositionsEmpty(positions)) return false;
@@ -119,5 +148,4 @@ public class GameBoard {
     public List<Ship> getShips() {
         return ships;
     }
-    
 }

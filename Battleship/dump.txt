@@ -1,0 +1,2403 @@
+// This is important:
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.Arrays;   // if needed for Arrays usage
+import java.util.List;    // if needed for List usage
+import java.util.ArrayList; // if needed for ArrayList usage
+// Make sure NOT to import java.util.Timer
+
+
+public class BattleshipGUI extends JFrame {
+    private GameController gameController;
+    private JPanel playerPanel;
+    private JPanel enemyPanel;
+    private JLabel messageLabel;
+    private final int SIZE = 10;
+    private JButton[][] playerButtons;
+    private JButton[][] enemyButtons;
+
+    // Variables for brute force timer and metrics
+    private Timer bruteForceTimer;
+    private int currentRow = 0;
+    private int currentCol = 0;
+    private int moveCount = 0;
+    private long startTime = 0;
+    
+    // Variables for probability density timer and metrics
+    private Timer probabilityTimer;
+    private PDSearch pdSearch;  // our inner class instance
+    private long probabilityStartTime = 0;
+    
+    public BattleshipGUI() {
+        gameController = new GameController();
+        setTitle("Battleship Game");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        
+        // Top panel for messages and algorithm buttons
+        JPanel topPanel = new JPanel(new BorderLayout());
+        
+        messageLabel = new JLabel("Choose an algorithm to start the search.", SwingConstants.CENTER);
+        topPanel.add(messageLabel, BorderLayout.CENTER);
+        
+        // Panel for algorithm buttons
+        JPanel buttonPanel = new JPanel(new FlowLayout());
+        
+        JButton startBruteForceBtn = new JButton("Start Brute Force (with Target)");
+        startBruteForceBtn.addActionListener(e -> startBruteForce());
+        buttonPanel.add(startBruteForceBtn);
+        
+        JButton startProbabilityBtn = new JButton("Start Probability Density");
+        startProbabilityBtn.addActionListener(e -> startProbabilityDensity());
+        buttonPanel.add(startProbabilityBtn);
+        
+        topPanel.add(buttonPanel, BorderLayout.EAST);
+        add(topPanel, BorderLayout.NORTH);
+        
+        // Create panels for the two boards.
+        JPanel boardsPanel = new JPanel(new GridLayout(1, 2));
+        playerPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        enemyPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        
+        playerButtons = new JButton[SIZE][SIZE];
+        enemyButtons = new JButton[SIZE][SIZE];
+        
+        // Initialize the player's board (for display).
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton();
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                button.setEnabled(false); // Player board is display-only.
+                button.setText(String.valueOf(gameController.getPlayerBoard().getBoard()[i][j]));
+                playerButtons[i][j] = button;
+                playerPanel.add(button);
+            }
+        }
+        
+        // Initialize the enemy board (for display).
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton("-");
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                // Manual click listener commented out to avoid conflict with automated search.
+                enemyButtons[i][j] = button;
+                enemyPanel.add(button);
+            }
+        }
+        
+        boardsPanel.add(playerPanel);
+        boardsPanel.add(enemyPanel);
+        add(boardsPanel, BorderLayout.CENTER);
+        
+        pack();
+        setLocationRelativeTo(null);
+        setVisible(true);
+    }
+    
+    // ----------------- Helper Method to Update Stats -----------------
+    private void updateStatsLabel(int moves, String prefix) {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        int hitCount = 0;
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] == 'X') {
+                    hitCount++;
+                }
+            }
+        }
+        int sunkCount = 0;
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (ship.isSunk()) {
+                sunkCount++;
+            }
+        }
+        messageLabel.setText("<html>" + prefix + "<br/>Moves : " + moves + "    Hit : " + hitCount + "    Sunk : " + sunkCount + "</html>");
+    }
+    
+    // ----------------- Brute Force with Target Mode Methods -----------------
+    
+    // Resets counters and starts the brute force timer.
+    private void startBruteForce() {
+        currentRow = 0;
+        currentCol = 0;
+        moveCount = 0;
+        startTime = System.nanoTime();
+        
+        if (bruteForceTimer != null && bruteForceTimer.isRunning()) {
+            bruteForceTimer.stop();
+        }
+        
+        updateStatsLabel(moveCount, "Brute force search started...");
+        bruteForceTimer = new Timer(500, e -> doOneBruteForceStep());
+        bruteForceTimer.start();
+    }
+    
+    // Check if target mode is active by scanning for any hit ('X') that has an adjacent unvisited cell.
+    private boolean isTargetModeActive() {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        int[][] directions = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+        for (int i = 0; i < SIZE; i++){
+            for (int j = 0; j < SIZE; j++){
+                if (board[i][j] == 'X') {
+                    for (int[] d : directions) {
+                        int ni = i + d[0], nj = j + d[1];
+                        if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                            if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    
+    // Execute one target-mode move: fire at an unvisited cell adjacent to a hit.
+    private void doTargetStep() {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+        for (int i = 0; i < SIZE; i++){
+            for (int j = 0; j < SIZE; j++){
+                if (board[i][j] == 'X') {
+                    for (int[] d : directions) {
+                        int ni = i + d[0], nj = j + d[1];
+                        if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                            if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                                String pos = "" + (char)('A' + nj) + (ni + 1);
+                                String result = gameController.getEnemyBoard().attackPosition(pos);
+                                moveCount++;
+                                updateEnemyBoard();
+                                updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+                                return; // Execute one target move and exit.
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Modified brute force step: if target mode is active, do a target move; otherwise, do the systematic move.
+    private void doOneBruteForceStep() {
+    // 1) Immediately check if all ships are already sunk
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "All enemy ships were already sunk! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 2) If target mode is active, do a target move
+    if (isTargetModeActive()) {
+        doTargetStep();
+        return;
+    }
+    
+    // 3) If we've systematically checked all cells, stop brute force
+    if (currentRow >= SIZE) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "Brute force finished all cells! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 4) Systematic attack at (currentRow, currentCol)
+    String pos = "" + (char)('A' + currentCol) + (currentRow + 1);
+    String result = gameController.getEnemyBoard().attackPosition(pos);
+    
+    // 5) Only increment moveCount if the position wasn't already attacked
+    if (!result.equals("Position already attacked!")) {
+        moveCount++;
+    }
+    
+    // Update board and stats
+    updateEnemyBoard();
+    updateStatsLabel(moveCount, "Brute Force: Attacking " + pos + ": " + result);
+    
+    // 6) Check again if all ships are sunk after the move
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "All enemy ships sunk by brute force at " + pos + 
+            "! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 7) Advance to the next cell in the brute force scan
+    currentCol++;
+    if (currentCol >= SIZE) {
+        currentCol = 0;
+        currentRow++;
+    }
+}
+
+    
+    // ----------------- Probability Density Methods (Unchanged) -----------------
+    
+    /***********************************************************
+ * Probability Density with Target Mode
+ ***********************************************************/
+private void startProbabilityDensity() {
+    pdSearch = new PDSearch(gameController.getEnemyBoard());
+    probabilityStartTime = System.nanoTime();
+
+    if (probabilityTimer != null && probabilityTimer.isRunning()) {
+        probabilityTimer.stop();
+    }
+
+    updateStatsLabel(0, "Probability Density search started...");
+    probabilityTimer = new Timer(500, e -> doOneProbabilityStep());
+    probabilityTimer.start();
+}
+
+/**
+ * doOneProbabilityStep() checks if target mode is active:
+ *   - If yes, fire at an adjacent cell (target mode).
+ *   - If no, pick a cell based on the probability grid.
+ * Stop immediately if the game is over.
+ */
+private void doOneProbabilityStep() {
+    // 1) Immediately check if all ships are sunk.
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        probabilityTimer.stop();
+        long elapsedTime = System.nanoTime() - probabilityStartTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(pdSearch.getMoveCount(),
+            "All enemy ships were already sunk! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+
+    // 2) If target mode is active, do a target step.
+    if (isTargetModeActivePD()) {
+        doTargetStepPD();
+        return;
+    }
+
+    // 3) Otherwise, proceed with probability approach.
+    String result = pdSearch.doOneStep();
+
+    // If no valid moves remain:
+    if (result.equals("No valid moves!")) {
+        probabilityTimer.stop();
+        updateStatsLabel(pdSearch.getMoveCount(), "Probability Density: " + result);
+        return;
+    }
+
+    // Only increment the move counter if not a duplicate attack
+    if (!result.equals("Position already attacked!")) {
+        // The PDSearch code itself increments pdSearch's internal counter,
+        // but if you also want to reflect a global count, you can do that here.
+        // For example, if you want a separate "global" move count, you'd do it here.
+        // For now, we rely on pdSearch.getMoveCount() as the canonical count.
+    }
+
+    updateEnemyBoard();
+    updateStatsLabel(pdSearch.getMoveCount(), "Probability: " + result + " (Move: " + pdSearch.getMoveCount() + ")");
+
+    // 4) Check again if all ships are sunk after the move.
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        probabilityTimer.stop();
+        long elapsedTime = System.nanoTime() - probabilityStartTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(pdSearch.getMoveCount(),
+            "Probability Density sunk all ships! Time: " + ms + " ms (" + s + " s).");
+    }
+}
+
+/***********************************************************
+ * Helper Methods for Probability + Target
+ ***********************************************************/
+
+/**
+ * isTargetModeActivePD() checks if there's any 'X' on the board
+ * that has an adjacent unvisited cell. If so, target mode is active.
+ */
+private boolean isTargetModeActivePD() {
+    char[][] board = gameController.getEnemyBoard().getBoard();
+    int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (board[i][j] == 'X') {
+                for (int[] d : directions) {
+                    int ni = i + d[0], nj = j + d[1];
+                    if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                        if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * doTargetStepPD() fires at an unvisited cell adjacent to any 'X'.
+ * This is the same logic as doTargetStep(), but for the probability approach.
+ */
+private void doTargetStepPD() {
+    char[][] board = gameController.getEnemyBoard().getBoard();
+    int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (board[i][j] == 'X') {
+                for (int[] d : directions) {
+                    int ni = i + d[0], nj = j + d[1];
+                    if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                        if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            // If not a duplicate attack, increment the PDSearch's internal move counter.
+                            if (!result.equals("Position already attacked!")) {
+                                // We'll manually increment the PDSearch's move count.
+                                // This ensures doOneProbabilityStep()'s move count is accurate.
+                                // Alternatively, you could keep a separate global count.
+                                pdSearch.incrementMoveCount(); 
+                            }
+                            updateEnemyBoard();
+                            updateStatsLabel(pdSearch.getMoveCount(),
+                                "Target Mode (PD): Attacking " + pos + ": " + result);
+                            return; // Execute one target move and exit.
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+    
+    
+    
+    // ----------------- Helper Method to Update Enemy Board Display -----------------
+    private void updateEnemyBoard() {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                char cell = board[i][j];
+                if (cell == 'X' || cell == 'M') {
+                    enemyButtons[i][j].setText(String.valueOf(cell));
+                } else {
+                    enemyButtons[i][j].setText("-");
+                }
+            }
+        }
+    }
+    
+    // (Optional) Update player's board if needed.
+    private void updatePlayerBoard() {
+        char[][] board = gameController.getPlayerBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                playerButtons[i][j].setText(String.valueOf(board[i][j]));
+            }
+        }
+    }
+    
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new BattleshipGUI());
+    }
+    
+    // --------------- Inner Class for Probability Density Search ---------------
+    private class PDSearch {
+        private GameBoard enemyBoard;
+        private int SIZE;
+        private int moveCount;
+        private int[][] probabilityGrid; // stores the count for each cell
+
+        public PDSearch(GameBoard enemyBoard) {
+            this.enemyBoard = enemyBoard;
+            this.SIZE = enemyBoard.getRows();
+            this.probabilityGrid = new int[SIZE][SIZE];
+            this.moveCount = 0;
+        }
+        
+        private boolean isCellAvailable(int row, int col, char[][] board) {
+            char cell = board[row][col];
+            return (cell == '-' || cell == 'S' || cell == 'X');
+        }
+        
+        private boolean canPlaceHorizontally(int row, int col, int shipLength, char[][] board) {
+            if (col + shipLength > SIZE) return false;
+            for (int j = col; j < col + shipLength; j++) {
+                if (!isCellAvailable(row, j, board)) return false;
+            }
+            return true;
+        }
+        
+        private boolean canPlaceVertically(int row, int col, int shipLength, char[][] board) {
+            if (row + shipLength > SIZE) return false;
+            for (int i = row; i < row + shipLength; i++) {
+                if (!isCellAvailable(i, col, board)) return false;
+            }
+            return true;
+        }
+        
+        private void computeProbabilityGrid() {
+            for (int i = 0; i < SIZE; i++) {
+                Arrays.fill(probabilityGrid[i], 0);
+            }
+            char[][] board = enemyBoard.getBoard();
+            for (Ship ship : enemyBoard.getShips()) {
+                if (ship.isSunk()) continue;
+                int shipLength = ship.getSize();
+                for (int i = 0; i < SIZE; i++) {
+                    for (int j = 0; j < SIZE; j++) {
+                        if (canPlaceHorizontally(i, j, shipLength, board)) {
+                            for (int j2 = j; j2 < j + shipLength; j2++) {
+                                probabilityGrid[i][j2]++;
+                            }
+                        }
+                        if (canPlaceVertically(i, j, shipLength, board)) {
+                            for (int i2 = i; i2 < i + shipLength; i2++) {
+                                probabilityGrid[i2][j]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        private int[] getBestCell() {
+            computeProbabilityGrid();
+            int bestRow = -1;
+            int bestCol = -1;
+            int maxProb = -1;
+            char[][] board = enemyBoard.getBoard();
+            for (int i = 0; i < SIZE; i++) {
+                for (int j = 0; j < SIZE; j++) {
+                    if (!(board[i][j] == '-' || board[i][j] == 'S' || board[i][j] == 'X')) continue;
+                    if (probabilityGrid[i][j] > maxProb) {
+                        maxProb = probabilityGrid[i][j];
+                        bestRow = i;
+                        bestCol = j;
+                    }
+                }
+            }
+            return new int[]{bestRow, bestCol};
+        }
+        
+        public String doOneStep() {
+            int[] best = getBestCell();
+            int row = best[0];
+            int col = best[1];
+            if (row == -1 || col == -1) {
+                return "No valid moves!";
+            }
+            String pos = "" + (char)('A' + col) + (row + 1);
+            String result = enemyBoard.attackPosition(pos);
+            moveCount++;
+            return "Attacking " + pos + ": " + result;
+        }
+        
+        public int getMoveCount() {
+            return moveCount;
+        }
+        
+        public boolean isSearchComplete() {
+            return enemyBoard.allShipsSunk();
+        }
+
+        public void incrementMoveCount() {
+            moveCount++;
+        }
+    }
+}
+
+
+
+
+--------------------------------------------------------------------------------------
+
+// This is important:
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.Arrays;   // if needed for Arrays usage
+import java.util.List;    // if needed for List usage
+import java.util.ArrayList; // if needed for ArrayList usage
+// Make sure NOT to import java.util.Timer
+
+
+public class BattleshipGUI extends JFrame {
+    private GameController gameController;
+    private JPanel playerPanel;
+    private JPanel enemyPanel;
+    private JLabel messageLabel;
+    private final int SIZE = 10;
+    private JButton[][] playerButtons;
+    private JButton[][] enemyButtons;
+
+    // Variables for brute force timer and metrics
+    private Timer bruteForceTimer;
+    private int currentRow = 0;
+    private int currentCol = 0;
+    private int moveCount = 0;
+    private long startTime = 0;
+    
+    // Variables for probability density timer and metrics
+    private Timer probabilityTimer;
+    private PDSearch pdSearch;  // our inner class instance
+    private long probabilityStartTime = 0;
+    
+    public BattleshipGUI() {
+        gameController = new GameController();
+        setTitle("Battleship Game");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        
+        // Top panel for messages and algorithm buttons
+        JPanel topPanel = new JPanel(new BorderLayout());
+        
+        messageLabel = new JLabel("Choose an algorithm to start the search.", SwingConstants.CENTER);
+        topPanel.add(messageLabel, BorderLayout.CENTER);
+        
+        // Panel for algorithm buttons
+        JPanel buttonPanel = new JPanel(new FlowLayout());
+        
+        JButton startBruteForceBtn = new JButton("Start Brute Force (with Target)");
+        startBruteForceBtn.addActionListener(e -> startBruteForce());
+        buttonPanel.add(startBruteForceBtn);
+        
+        JButton startProbabilityBtn = new JButton("Start Probability Density");
+        startProbabilityBtn.addActionListener(e -> startProbabilityDensity());
+        buttonPanel.add(startProbabilityBtn);
+        
+        topPanel.add(buttonPanel, BorderLayout.EAST);
+        add(topPanel, BorderLayout.NORTH);
+        
+        // Create panels for the two boards.
+        JPanel boardsPanel = new JPanel(new GridLayout(1, 2));
+        playerPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        enemyPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        
+        playerButtons = new JButton[SIZE][SIZE];
+        enemyButtons = new JButton[SIZE][SIZE];
+        
+        // Initialize the player's board (for display).
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton();
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                button.setEnabled(false); // Player board is display-only.
+                button.setText(String.valueOf(gameController.getPlayerBoard().getBoard()[i][j]));
+                playerButtons[i][j] = button;
+                playerPanel.add(button);
+            }
+        }
+        
+        // Initialize the enemy board (for display).
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton("-");
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                // Manual click listener commented out to avoid conflict with automated search.
+                enemyButtons[i][j] = button;
+                enemyPanel.add(button);
+            }
+        }
+        
+        boardsPanel.add(playerPanel);
+        boardsPanel.add(enemyPanel);
+        add(boardsPanel, BorderLayout.CENTER);
+        
+        pack();
+        setLocationRelativeTo(null);
+        setVisible(true);
+    }
+    
+    // ----------------- Helper Method to Update Stats -----------------
+    private void updateStatsLabel(int moves, String prefix) {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        int hitCount = 0;
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] == 'X') {
+                    hitCount++;
+                }
+            }
+        }
+        int sunkCount = 0;
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (ship.isSunk()) {
+                sunkCount++;
+            }
+        }
+        messageLabel.setText("<html>" + prefix + "<br/>Moves : " + moves + "    Hit : " + hitCount + "    Sunk : " + sunkCount + "</html>");
+    }
+    
+    // ----------------- Brute Force with Target Mode Methods -----------------
+    
+    // Resets counters and starts the brute force timer.
+    private void startBruteForce() {
+        currentRow = 0;
+        currentCol = 0;
+        moveCount = 0;
+        startTime = System.nanoTime();
+        
+        if (bruteForceTimer != null && bruteForceTimer.isRunning()) {
+            bruteForceTimer.stop();
+        }
+        
+        updateStatsLabel(moveCount, "Brute force search started...");
+        bruteForceTimer = new Timer(500, e -> doOneBruteForceStep());
+        bruteForceTimer.start();
+    }
+    
+    // Check if target mode is active by scanning for any hit ('X') that has an adjacent unvisited cell.
+    private boolean isTargetModeActive() {
+        // Check if there's any unsunk ship with at least one hit.
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (!ship.isSunk() && !ship.getHitPositions().isEmpty()) {
+                return true; 
+            }
+        }
+        return false;
+    }
+    
+    
+    // Execute one target-mode move: fire at an unvisited cell adjacent to a hit.
+    private void doTargetStep() {
+        // For each unsunk ship that has hits, try to lock on.
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (ship.isSunk() || ship.getHitPositions().isEmpty()) {
+                continue;
+            }
+            // Convert hit positions to coordinates.
+            List<int[]> hitCoords = new ArrayList<>();
+            for (String pos : ship.getHitPositions()) {
+                int[] coords = convertPosition(pos);
+                if (coords != null) {
+                    hitCoords.add(coords);
+                }
+            }
+            if (hitCoords.isEmpty()) continue;
+            
+            int[][] directions;
+            // If only one hit exists, check all four directions.
+            if (hitCoords.size() == 1) {
+                directions = new int[][] { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+            } else {
+                // Multiple hits exist. Determine alignment.
+                boolean horizontal = true, vertical = true;
+                int baseRow = hitCoords.get(0)[0];
+                int baseCol = hitCoords.get(0)[1];
+                for (int[] coord : hitCoords) {
+                    if (coord[0] != baseRow) {
+                        horizontal = false;
+                    }
+                    if (coord[1] != baseCol) {
+                        vertical = false;
+                    }
+                }
+                // If aligned horizontally, search only left and right based on the cluster.
+                if (horizontal) {
+                    int minCol = SIZE, maxCol = -1;
+                    for (int[] coord : hitCoords) {
+                        minCol = Math.min(minCol, coord[1]);
+                        maxCol = Math.max(maxCol, coord[1]);
+                    }
+                    directions = new int[][] { {0, -1}, {0, 1} };
+                    // We'll try candidate cells at (baseRow, minCol - 1) and (baseRow, maxCol + 1)
+                    // in the try loop below.
+                }
+                // If aligned vertically, search only up and down.
+                else if (vertical) {
+                    int minRow = SIZE, maxRow = -1;
+                    for (int[] coord : hitCoords) {
+                        minRow = Math.min(minRow, coord[0]);
+                        maxRow = Math.max(maxRow, coord[0]);
+                    }
+                    directions = new int[][] { {-1, 0}, {1, 0} };
+                    // We'll try candidate cells at (minRow - 1, baseCol) and (maxRow + 1, baseCol)
+                }
+                else {
+                    // If hits are not clearly aligned, fallback to all four directions.
+                    directions = new int[][] { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+                }
+            }
+            
+            // Now, for this ship's hit positions, try each direction.
+            char[][] board = gameController.getEnemyBoard().getBoard();
+            for (int[] d : directions) {
+                // For multiple hits (aligned), we want to extend the cluster.
+                // If horizontal, determine candidate based on min/max column.
+                if (hitCoords.size() > 1) {
+                    if (d[0] == 0) { // horizontal candidate
+                        int row = hitCoords.get(0)[0];
+                        int minCol = SIZE, maxCol = -1;
+                        for (int[] coord : hitCoords) {
+                            minCol = Math.min(minCol, coord[1]);
+                            maxCol = Math.max(maxCol, coord[1]);
+                        }
+                        // Try left if direction is left.
+                        if (d[1] < 0 && minCol - 1 >= 0 && (board[row][minCol - 1] == '-' || board[row][minCol - 1] == 'S')) {
+                            int ni = row, nj = minCol - 1;
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            moveCount++;
+                            updateEnemyBoard();
+                            updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+                            return;
+                        }
+                        // Try right if direction is right.
+                        if (d[1] > 0 && maxCol + 1 < SIZE && (board[row][maxCol + 1] == '-' || board[row][maxCol + 1] == 'S')) {
+                            int ni = row, nj = maxCol + 1;
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            moveCount++;
+                            updateEnemyBoard();
+                            updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+                            return;
+                        }
+                    }
+                    else if (hitCoords.size() > 1 && d[0] != 0) { // vertical candidate
+                        int col = hitCoords.get(0)[1];
+                        int minRow = SIZE, maxRow = -1;
+                        for (int[] coord : hitCoords) {
+                            minRow = Math.min(minRow, coord[0]);
+                            maxRow = Math.max(maxRow, coord[0]);
+                        }
+                        // Try up if direction is up.
+                        if (d[0] < 0 && minRow - 1 >= 0 && (board[minRow - 1][col] == '-' || board[minRow - 1][col] == 'S')) {
+                            int ni = minRow - 1, nj = col;
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            moveCount++;
+                            updateEnemyBoard();
+                            updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+                            return;
+                        }
+                        // Try down if direction is down.
+                        if (d[0] > 0 && maxRow + 1 < SIZE && (board[maxRow + 1][col] == '-' || board[maxRow + 1][col] == 'S')) {
+                            int ni = maxRow + 1, nj = col;
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            moveCount++;
+                            updateEnemyBoard();
+                            updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+                            return;
+                        }
+                    }
+                }
+                
+                // If not multiple aligned hits or if the above conditions did not return, try normal adjacent cells.
+                for (int i = 0; i < SIZE; i++) { // we scan the board again
+                    for (int j = 0; j < SIZE; j++) {
+                        if (board[i][j] == 'X') {
+                            int ni = i + d[0], nj = j + d[1];
+                            if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                                if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                                    String pos = "" + (char)('A' + nj) + (ni + 1);
+                                    String result = gameController.getEnemyBoard().attackPosition(pos);
+                                    moveCount++;
+                                    updateEnemyBoard();
+                                    updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    
+    private int[] convertPosition(String position) {
+        if (position.length() < 2) return null;
+        char column = position.toUpperCase().charAt(0);
+        int row;
+        try {
+            row = Integer.parseInt(position.substring(1)) - 1;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        int col = column - 'A';
+        if (row < 0 || row >= SIZE || col < 0 || col >= SIZE) return null;
+        return new int[] { row, col };
+    }
+    
+    
+    
+
+    
+    
+    // Modified brute force step: if target mode is active, do a target move; otherwise, do the systematic move.
+    private void doOneBruteForceStep() {
+    // 1) Immediately check if all ships are already sunk
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "All enemy ships were already sunk! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 2) If target mode is active, do a target move
+    if (isTargetModeActive()) {
+        doTargetStep();
+        return;
+    }
+    
+    // 3) If we've systematically checked all cells, stop brute force
+    if (currentRow >= SIZE) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "Brute force finished all cells! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 4) Systematic attack at (currentRow, currentCol)
+    String pos = "" + (char)('A' + currentCol) + (currentRow + 1);
+    String result = gameController.getEnemyBoard().attackPosition(pos);
+    
+    // 5) Only increment moveCount if the position wasn't already attacked
+    if (!result.equals("Position already attacked!")) {
+        moveCount++;
+    }
+    
+    // Update board and stats
+    updateEnemyBoard();
+    updateStatsLabel(moveCount, "Brute Force: Attacking " + pos + ": " + result);
+    
+    // 6) Check again if all ships are sunk after the move
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "All enemy ships sunk by brute force at " + pos + 
+            "! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 7) Advance to the next cell in the brute force scan
+    currentCol++;
+    if (currentCol >= SIZE) {
+        currentCol = 0;
+        currentRow++;
+    }
+}
+
+    
+    // ----------------- Probability Density Methods (Unchanged) -----------------
+    
+    /***********************************************************
+ * Probability Density with Target Mode
+ ***********************************************************/
+private void startProbabilityDensity() {
+    pdSearch = new PDSearch(gameController.getEnemyBoard());
+    probabilityStartTime = System.nanoTime();
+
+    if (probabilityTimer != null && probabilityTimer.isRunning()) {
+        probabilityTimer.stop();
+    }
+
+    updateStatsLabel(0, "Probability Density search started...");
+    probabilityTimer = new Timer(500, e -> doOneProbabilityStep());
+    probabilityTimer.start();
+}
+
+/**
+ * doOneProbabilityStep() checks if target mode is active:
+ *   - If yes, fire at an adjacent cell (target mode).
+ *   - If no, pick a cell based on the probability grid.
+ * Stop immediately if the game is over.
+ */
+private void doOneProbabilityStep() {
+    // 1) Immediately check if all ships are sunk.
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        probabilityTimer.stop();
+        long elapsedTime = System.nanoTime() - probabilityStartTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(pdSearch.getMoveCount(),
+            "All enemy ships were already sunk! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+
+    // 2) If target mode is active, do a target step.
+    if (isTargetModeActivePD()) {
+        doTargetStepPD();
+        return;
+    }
+
+    // 3) Otherwise, proceed with probability approach.
+    String result = pdSearch.doOneStep();
+
+    // If no valid moves remain:
+    if (result.equals("No valid moves!")) {
+        probabilityTimer.stop();
+        updateStatsLabel(pdSearch.getMoveCount(), "Probability Density: " + result);
+        return;
+    }
+
+    // Only increment the move counter if not a duplicate attack
+    if (!result.equals("Position already attacked!")) {
+        // The PDSearch code itself increments pdSearch's internal counter,
+        // but if you also want to reflect a global count, you can do that here.
+        // For example, if you want a separate "global" move count, you'd do it here.
+        // For now, we rely on pdSearch.getMoveCount() as the canonical count.
+    }
+
+    updateEnemyBoard();
+    updateStatsLabel(pdSearch.getMoveCount(), "Probability: " + result + " (Move: " + pdSearch.getMoveCount() + ")");
+
+    // 4) Check again if all ships are sunk after the move.
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        probabilityTimer.stop();
+        long elapsedTime = System.nanoTime() - probabilityStartTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(pdSearch.getMoveCount(),
+            "Probability Density sunk all ships! Time: " + ms + " ms (" + s + " s).");
+    }
+}
+
+/***********************************************************
+ * Helper Methods for Probability + Target
+ ***********************************************************/
+
+/**
+ * isTargetModeActivePD() checks if there's any 'X' on the board
+ * that has an adjacent unvisited cell. If so, target mode is active.
+ */
+private boolean isTargetModeActivePD() {
+    char[][] board = gameController.getEnemyBoard().getBoard();
+    int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (board[i][j] == 'X') {
+                for (int[] d : directions) {
+                    int ni = i + d[0], nj = j + d[1];
+                    if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                        if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * doTargetStepPD() fires at an unvisited cell adjacent to any 'X'.
+ * This is the same logic as doTargetStep(), but for the probability approach.
+ */
+private void doTargetStepPD() {
+    char[][] board = gameController.getEnemyBoard().getBoard();
+    int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (board[i][j] == 'X') {
+                for (int[] d : directions) {
+                    int ni = i + d[0], nj = j + d[1];
+                    if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                        if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            // If not a duplicate attack, increment the PDSearch's internal move counter.
+                            if (!result.equals("Position already attacked!")) {
+                                // We'll manually increment the PDSearch's move count.
+                                // This ensures doOneProbabilityStep()'s move count is accurate.
+                                // Alternatively, you could keep a separate global count.
+                                pdSearch.incrementMoveCount(); 
+                            }
+                            updateEnemyBoard();
+                            updateStatsLabel(pdSearch.getMoveCount(),
+                                "Target Mode (PD): Attacking " + pos + ": " + result);
+                            return; // Execute one target move and exit.
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+    
+    
+    
+    // ----------------- Helper Method to Update Enemy Board Display -----------------
+    private void updateEnemyBoard() {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                char cell = board[i][j];
+                if (cell == 'X' || cell == 'M') {
+                    enemyButtons[i][j].setText(String.valueOf(cell));
+                } else {
+                    enemyButtons[i][j].setText("-");
+                }
+            }
+        }
+    }
+    
+    // (Optional) Update player's board if needed.
+    private void updatePlayerBoard() {
+        char[][] board = gameController.getPlayerBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                playerButtons[i][j].setText(String.valueOf(board[i][j]));
+            }
+        }
+    }
+    
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new BattleshipGUI());
+    }
+    
+    // --------------- Inner Class for Probability Density Search ---------------
+    private class PDSearch {
+        private GameBoard enemyBoard;
+        private int SIZE;
+        private int moveCount;
+        private int[][] probabilityGrid; // stores the count for each cell
+
+        public PDSearch(GameBoard enemyBoard) {
+            this.enemyBoard = enemyBoard;
+            this.SIZE = enemyBoard.getRows();
+            this.probabilityGrid = new int[SIZE][SIZE];
+            this.moveCount = 0;
+        }
+        
+        private boolean isCellAvailable(int row, int col, char[][] board) {
+            char cell = board[row][col];
+            return (cell == '-' || cell == 'S' || cell == 'X');
+        }
+        
+        private boolean canPlaceHorizontally(int row, int col, int shipLength, char[][] board) {
+            if (col + shipLength > SIZE) return false;
+            for (int j = col; j < col + shipLength; j++) {
+                if (!isCellAvailable(row, j, board)) return false;
+            }
+            return true;
+        }
+        
+        private boolean canPlaceVertically(int row, int col, int shipLength, char[][] board) {
+            if (row + shipLength > SIZE) return false;
+            for (int i = row; i < row + shipLength; i++) {
+                if (!isCellAvailable(i, col, board)) return false;
+            }
+            return true;
+        }
+        
+        private void computeProbabilityGrid() {
+            for (int i = 0; i < SIZE; i++) {
+                Arrays.fill(probabilityGrid[i], 0);
+            }
+            char[][] board = enemyBoard.getBoard();
+            for (Ship ship : enemyBoard.getShips()) {
+                if (ship.isSunk()) continue;
+                int shipLength = ship.getSize();
+                for (int i = 0; i < SIZE; i++) {
+                    for (int j = 0; j < SIZE; j++) {
+                        if (canPlaceHorizontally(i, j, shipLength, board)) {
+                            for (int j2 = j; j2 < j + shipLength; j2++) {
+                                probabilityGrid[i][j2]++;
+                            }
+                        }
+                        if (canPlaceVertically(i, j, shipLength, board)) {
+                            for (int i2 = i; i2 < i + shipLength; i2++) {
+                                probabilityGrid[i2][j]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        private int[] getBestCell() {
+            computeProbabilityGrid();
+            int bestRow = -1;
+            int bestCol = -1;
+            int maxProb = -1;
+            char[][] board = enemyBoard.getBoard();
+            for (int i = 0; i < SIZE; i++) {
+                for (int j = 0; j < SIZE; j++) {
+                    if (!(board[i][j] == '-' || board[i][j] == 'S' || board[i][j] == 'X')) continue;
+                    if (probabilityGrid[i][j] > maxProb) {
+                        maxProb = probabilityGrid[i][j];
+                        bestRow = i;
+                        bestCol = j;
+                    }
+                }
+            }
+            return new int[]{bestRow, bestCol};
+        }
+        
+        public String doOneStep() {
+            int[] best = getBestCell();
+            int row = best[0];
+            int col = best[1];
+            if (row == -1 || col == -1) {
+                return "No valid moves!";
+            }
+            String pos = "" + (char)('A' + col) + (row + 1);
+            String result = enemyBoard.attackPosition(pos);
+            moveCount++;
+            return "Attacking " + pos + ": " + result;
+        }
+        
+        public int getMoveCount() {
+            return moveCount;
+        }
+        
+        public boolean isSearchComplete() {
+            return enemyBoard.allShipsSunk();
+        }
+
+        public void incrementMoveCount() {
+            moveCount++;
+        }
+    }
+}
+
+
+----------------------------------------------------------------------------------------
+
+// This is important:
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.Arrays;   // if needed for Arrays usage
+import java.util.List;    // if needed for List usage
+import java.util.ArrayList; // if needed for ArrayList usage
+// Make sure NOT to import java.util.Timer
+
+
+public class BattleshipGUI extends JFrame {
+    private GameController gameController;
+    private JPanel playerPanel;
+    private JPanel enemyPanel;
+    private JLabel messageLabel;
+    private final int SIZE = 10;
+    private JButton[][] playerButtons;
+    private JButton[][] enemyButtons;
+
+    // Variables for brute force timer and metrics
+    private Timer bruteForceTimer;
+    private int currentRow = 0;
+    private int currentCol = 0;
+    private int moveCount = 0;
+    private long startTime = 0;
+    
+    // Variables for probability density timer and metrics
+    private Timer probabilityTimer;
+    private PDSearch pdSearch;  // our inner class instance
+    private long probabilityStartTime = 0;
+    
+    public BattleshipGUI() {
+        gameController = new GameController();
+        setTitle("Battleship Game");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        
+        // Top panel for messages and algorithm buttons
+        JPanel topPanel = new JPanel(new BorderLayout());
+        
+        messageLabel = new JLabel("Choose an algorithm to start the search.", SwingConstants.CENTER);
+        topPanel.add(messageLabel, BorderLayout.CENTER);
+        
+        // Panel for algorithm buttons
+        JPanel buttonPanel = new JPanel(new FlowLayout());
+        
+        JButton startBruteForceBtn = new JButton("Start Brute Force (with Target)");
+        startBruteForceBtn.addActionListener(e -> startBruteForce());
+        buttonPanel.add(startBruteForceBtn);
+        
+        JButton startProbabilityBtn = new JButton("Start Probability Density");
+        startProbabilityBtn.addActionListener(e -> startProbabilityDensity());
+        buttonPanel.add(startProbabilityBtn);
+        
+        topPanel.add(buttonPanel, BorderLayout.EAST);
+        add(topPanel, BorderLayout.NORTH);
+        
+        // Create panels for the two boards.
+        JPanel boardsPanel = new JPanel(new GridLayout(1, 2));
+        playerPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        enemyPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        
+        playerButtons = new JButton[SIZE][SIZE];
+        enemyButtons = new JButton[SIZE][SIZE];
+        
+        // Initialize the player's board (for display).
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton();
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                button.setEnabled(false); // Player board is display-only.
+                button.setText(String.valueOf(gameController.getPlayerBoard().getBoard()[i][j]));
+                playerButtons[i][j] = button;
+                playerPanel.add(button);
+            }
+        }
+        
+        // Initialize the enemy board (for display).
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton("-");
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                // Manual click listener commented out to avoid conflict with automated search.
+                enemyButtons[i][j] = button;
+                enemyPanel.add(button);
+            }
+        }
+        
+        boardsPanel.add(playerPanel);
+        boardsPanel.add(enemyPanel);
+        add(boardsPanel, BorderLayout.CENTER);
+        
+        pack();
+        setLocationRelativeTo(null);
+        setVisible(true);
+    }
+    
+    // ----------------- Helper Method to Update Stats -----------------
+    private void updateStatsLabel(int moves, String prefix) {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        int hitCount = 0;
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] == 'X') {
+                    hitCount++;
+                }
+            }
+        }
+        int sunkCount = 0;
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (ship.isSunk()) {
+                sunkCount++;
+            }
+        }
+        messageLabel.setText("<html>" + prefix + "<br/>Moves : " + moves + "    Hit : " + hitCount + "    Sunk : " + sunkCount + "</html>");
+    }
+    
+    // ----------------- Brute Force with Target Mode Methods -----------------
+    
+    // Resets counters and starts the brute force timer.
+    private void startBruteForce() {
+        currentRow = 0;
+        currentCol = 0;
+        moveCount = 0;
+        startTime = System.nanoTime();
+        
+        if (bruteForceTimer != null && bruteForceTimer.isRunning()) {
+            bruteForceTimer.stop();
+        }
+        
+        updateStatsLabel(moveCount, "Brute force search started...");
+        bruteForceTimer = new Timer(500, e -> doOneBruteForceStep());
+        bruteForceTimer.start();
+    }
+    
+  // Check target mode by iterating over unsunk ships and ensuring they have recorded hits.
+private boolean isTargetModeActive() {
+    for (Ship ship : gameController.getEnemyBoard().getShips()) {
+        if (!ship.isSunk() && !ship.getHitPositions().isEmpty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Execute one target-mode move using the unsunk ship's recorded hits.
+private void doTargetStep() {
+    // Loop over all ships in the enemy board.
+    for (Ship ship : gameController.getEnemyBoard().getShips()) {
+        // Only consider unsunk ships with recorded hits.
+        if (ship.isSunk() || ship.getHitPositions().isEmpty()) {
+            continue;
+        }
+        // Convert hit positions into coordinates.
+        List<int[]> hitCoords = new ArrayList<>();
+        for (String pos : ship.getHitPositions()) {
+            int[] coord = convertPosition(pos);
+            if (coord != null) {
+                hitCoords.add(coord);
+            }
+        }
+        if (hitCoords.isEmpty()) continue;
+        
+        int targetRow = -1, targetCol = -1;
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        
+        // If only one hit, check all four directions.
+        if (hitCoords.size() == 1) {
+            int r = hitCoords.get(0)[0], c = hitCoords.get(0)[1];
+            int[][] directions = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+            for (int[] d : directions) {
+                int nr = r + d[0], nc = c + d[1];
+                if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE) {
+                    if (board[nr][nc] == '-' || board[nr][nc] == 'S') {
+                        targetRow = nr;
+                        targetCol = nc;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Multiple hits: Determine orientation.
+            boolean horizontal = true, vertical = true;
+            int baseRow = hitCoords.get(0)[0];
+            int baseCol = hitCoords.get(0)[1];
+            for (int[] coord : hitCoords) {
+                if (coord[0] != baseRow) horizontal = false;
+                if (coord[1] != baseCol) vertical = false;
+            }
+            if (horizontal && !vertical) {
+                // Ship appears horizontal: find min and max column.
+                int minCol = SIZE, maxCol = -1;
+                for (int[] coord : hitCoords) {
+                    minCol = Math.min(minCol, coord[1]);
+                    maxCol = Math.max(maxCol, coord[1]);
+                }
+                // Prefer to extend horizontally.
+                if (minCol - 1 >= 0 && (board[baseRow][minCol - 1] == '-' || board[baseRow][minCol - 1] == 'S')) {
+                    targetRow = baseRow;
+                    targetCol = minCol - 1;
+                } else if (maxCol + 1 < SIZE && (board[baseRow][maxCol + 1] == '-' || board[baseRow][maxCol + 1] == 'S')) {
+                    targetRow = baseRow;
+                    targetCol = maxCol + 1;
+                }
+            } else if (vertical && !horizontal) {
+                // Ship appears vertical: find min and max row.
+                int minRow = SIZE, maxRow = -1;
+                for (int[] coord : hitCoords) {
+                    minRow = Math.min(minRow, coord[0]);
+                    maxRow = Math.max(maxRow, coord[0]);
+                }
+                // Prefer to extend vertically.
+                if (minRow - 1 >= 0 && (board[minRow - 1][baseCol] == '-' || board[minRow - 1][baseCol] == 'S')) {
+                    targetRow = minRow - 1;
+                    targetCol = baseCol;
+                } else if (maxRow + 1 < SIZE && (board[maxRow + 1][baseCol] == '-' || board[maxRow + 1][baseCol] == 'S')) {
+                    targetRow = maxRow + 1;
+                    targetCol = baseCol;
+                }
+            } else {
+                // If not clearly aligned, fallback to checking adjacent to first hit.
+                int r = hitCoords.get(0)[0], c = hitCoords.get(0)[1];
+                int[][] directions = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+                for (int[] d : directions) {
+                    int nr = r + d[0], nc = c + d[1];
+                    if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE) {
+                        if (board[nr][nc] == '-' || board[nr][nc] == 'S') {
+                            targetRow = nr;
+                            targetCol = nc;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // If a valid target is found, fire.
+        if (targetRow != -1 && targetCol != -1) {
+            String pos = "" + (char)('A' + targetCol) + (targetRow + 1);
+            String result = gameController.getEnemyBoard().attackPosition(pos);
+            moveCount++;
+            updateEnemyBoard();
+            updateStatsLabel(moveCount, "Target Mode: Attacking " + pos + ": " + result);
+            return;
+        }
+    }
+    // If we get here without finding a valid target, do nothing.
+}
+
+    
+    
+    private int[] convertPosition(String position) {
+        if (position.length() < 2) return null;
+        char column = position.toUpperCase().charAt(0);
+        int row;
+        try {
+            row = Integer.parseInt(position.substring(1)) - 1;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        int col = column - 'A';
+        if (row < 0 || row >= SIZE || col < 0 || col >= SIZE) return null;
+        return new int[] { row, col };
+    }
+    
+    
+    
+
+    
+    
+    // Modified brute force step: if target mode is active, do a target move; otherwise, do the systematic move.
+    private void doOneBruteForceStep() {
+    // 1) Immediately check if all ships are already sunk
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "All enemy ships were already sunk! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 2) If target mode is active, do a target move
+    if (isTargetModeActive()) {
+        doTargetStep();
+        return;
+    }
+    
+    // 3) If we've systematically checked all cells, stop brute force
+    if (currentRow >= SIZE) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "Brute force finished all cells! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 4) Systematic attack at (currentRow, currentCol)
+    String pos = "" + (char)('A' + currentCol) + (currentRow + 1);
+    String result = gameController.getEnemyBoard().attackPosition(pos);
+    
+    // 5) Only increment moveCount if the position wasn't already attacked
+    if (!result.equals("Position already attacked!")) {
+        moveCount++;
+    }
+    
+    // Update board and stats
+    updateEnemyBoard();
+    updateStatsLabel(moveCount, "Brute Force: Attacking " + pos + ": " + result);
+    
+    // 6) Check again if all ships are sunk after the move
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        bruteForceTimer.stop();
+        long elapsedTime = System.nanoTime() - startTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(moveCount, "All enemy ships sunk by brute force at " + pos + 
+            "! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // 7) Advance to the next cell in the brute force scan
+    currentCol++;
+    if (currentCol >= SIZE) {
+        currentCol = 0;
+        currentRow++;
+    }
+}
+
+    
+    // ------------------ PROBABILITY DENSITY METHODS (Updated with Target Mode) ------------------
+
+private void startProbabilityDensity() {
+    pdSearch = new PDSearch(gameController.getEnemyBoard());
+    probabilityStartTime = System.nanoTime();
+    
+    if (probabilityTimer != null && probabilityTimer.isRunning()) {
+        probabilityTimer.stop();
+    }
+    
+    updateStatsLabel(0, "Probability Density search started...");
+    probabilityTimer = new Timer(500, e -> doOneProbabilityStep());
+    probabilityTimer.start();
+}
+
+private void doOneProbabilityStep() {
+    // Immediately check for game over.
+    if (gameController.getEnemyBoard().allShipsSunk()) {
+        probabilityTimer.stop();
+        long elapsedTime = System.nanoTime() - probabilityStartTime;
+        double ms = elapsedTime / 1_000_000.0;
+        double s = ms / 1000.0;
+        updateStatsLabel(pdSearch.getMoveCount(),
+            "Probability Density sunk all ships! Time: " + ms + " ms (" + s + " s).");
+        return;
+    }
+    
+    // If target mode is active, use target mode move.
+    if (isTargetModeActive()) {
+        doTargetStep(); // Reuse the same target step as in brute force.
+        return;
+    }
+    
+    // Otherwise, proceed with PD move.
+    String result = pdSearch.doOneStep();
+    
+    if (result.equals("No valid moves!")) {
+        probabilityTimer.stop();
+        updateStatsLabel(pdSearch.getMoveCount(), "Probability Density: " + result);
+        return;
+    }
+    
+    updateEnemyBoard();
+    updateStatsLabel(pdSearch.getMoveCount(),
+        "Probability: " + result + " (Move: " + pdSearch.getMoveCount() + ")");
+}
+
+
+/***********************************************************
+ * Helper Methods for Probability + Target
+ ***********************************************************/
+
+/**
+ * isTargetModeActivePD() checks if there's any 'X' on the board
+ * that has an adjacent unvisited cell. If so, target mode is active.
+ */
+private boolean isTargetModeActivePD() {
+    char[][] board = gameController.getEnemyBoard().getBoard();
+    int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (board[i][j] == 'X') {
+                for (int[] d : directions) {
+                    int ni = i + d[0], nj = j + d[1];
+                    if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                        if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * doTargetStepPD() fires at an unvisited cell adjacent to any 'X'.
+ * This is the same logic as doTargetStep(), but for the probability approach.
+ */
+private void doTargetStepPD() {
+    char[][] board = gameController.getEnemyBoard().getBoard();
+    int[][] directions = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (board[i][j] == 'X') {
+                for (int[] d : directions) {
+                    int ni = i + d[0], nj = j + d[1];
+                    if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE) {
+                        if (board[ni][nj] == '-' || board[ni][nj] == 'S') {
+                            String pos = "" + (char)('A' + nj) + (ni + 1);
+                            String result = gameController.getEnemyBoard().attackPosition(pos);
+                            // If not a duplicate attack, increment the PDSearch's internal move counter.
+                            if (!result.equals("Position already attacked!")) {
+                                // We'll manually increment the PDSearch's move count.
+                                // This ensures doOneProbabilityStep()'s move count is accurate.
+                                // Alternatively, you could keep a separate global count.
+                                pdSearch.incrementMoveCount(); 
+                            }
+                            updateEnemyBoard();
+                            updateStatsLabel(pdSearch.getMoveCount(),
+                                "Target Mode (PD): Attacking " + pos + ": " + result);
+                            return; // Execute one target move and exit.
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+    
+    
+    
+    // ----------------- Helper Method to Update Enemy Board Display -----------------
+    private void updateEnemyBoard() {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                char cell = board[i][j];
+                if (cell == 'X' || cell == 'M') {
+                    enemyButtons[i][j].setText(String.valueOf(cell));
+                } else {
+                    enemyButtons[i][j].setText("-");
+                }
+            }
+        }
+    }
+    
+    // (Optional) Update player's board if needed.
+    private void updatePlayerBoard() {
+        char[][] board = gameController.getPlayerBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                playerButtons[i][j].setText(String.valueOf(board[i][j]));
+            }
+        }
+    }
+    
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new BattleshipGUI());
+    }
+    
+    // --------------- Inner Class for Probability Density Search ---------------
+    private class PDSearch {
+        private GameBoard enemyBoard;
+        private int SIZE;
+        private int moveCount;
+        private int[][] probabilityGrid; // stores the count for each cell
+
+        public PDSearch(GameBoard enemyBoard) {
+            this.enemyBoard = enemyBoard;
+            this.SIZE = enemyBoard.getRows();
+            this.probabilityGrid = new int[SIZE][SIZE];
+            this.moveCount = 0;
+        }
+        
+        private boolean isCellAvailable(int row, int col, char[][] board) {
+            char cell = board[row][col];
+            return (cell == '-' || cell == 'S' || cell == 'X');
+        }
+        
+        private boolean canPlaceHorizontally(int row, int col, int shipLength, char[][] board) {
+            if (col + shipLength > SIZE) return false;
+            for (int j = col; j < col + shipLength; j++) {
+                if (!isCellAvailable(row, j, board)) return false;
+            }
+            return true;
+        }
+        
+        private boolean canPlaceVertically(int row, int col, int shipLength, char[][] board) {
+            if (row + shipLength > SIZE) return false;
+            for (int i = row; i < row + shipLength; i++) {
+                if (!isCellAvailable(i, col, board)) return false;
+            }
+            return true;
+        }
+        
+        private void computeProbabilityGrid() {
+            for (int i = 0; i < SIZE; i++) {
+                Arrays.fill(probabilityGrid[i], 0);
+            }
+            char[][] board = enemyBoard.getBoard();
+            for (Ship ship : enemyBoard.getShips()) {
+                if (ship.isSunk()) continue;
+                int shipLength = ship.getSize();
+                for (int i = 0; i < SIZE; i++) {
+                    for (int j = 0; j < SIZE; j++) {
+                        if (canPlaceHorizontally(i, j, shipLength, board)) {
+                            for (int j2 = j; j2 < j + shipLength; j2++) {
+                                probabilityGrid[i][j2]++;
+                            }
+                        }
+                        if (canPlaceVertically(i, j, shipLength, board)) {
+                            for (int i2 = i; i2 < i + shipLength; i2++) {
+                                probabilityGrid[i2][j]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        private int[] getBestCell() {
+            computeProbabilityGrid();
+            int bestRow = -1;
+            int bestCol = -1;
+            int maxProb = -1;
+            char[][] board = enemyBoard.getBoard();
+            for (int i = 0; i < SIZE; i++) {
+                for (int j = 0; j < SIZE; j++) {
+                    if (!(board[i][j] == '-' || board[i][j] == 'S' || board[i][j] == 'X')) continue;
+                    if (probabilityGrid[i][j] > maxProb) {
+                        maxProb = probabilityGrid[i][j];
+                        bestRow = i;
+                        bestCol = j;
+                    }
+                }
+            }
+            return new int[]{bestRow, bestCol};
+        }
+        
+        public String doOneStep() {
+            int[] best = getBestCell();
+            int row = best[0];
+            int col = best[1];
+            if (row == -1 || col == -1) {
+                return "No valid moves!";
+            }
+            String pos = "" + (char)('A' + col) + (row + 1);
+            String result = enemyBoard.attackPosition(pos);
+            moveCount++;
+            return "Attacking " + pos + ": " + result;
+        }
+        
+        public int getMoveCount() {
+            return moveCount;
+        }
+        
+        public boolean isSearchComplete() {
+            return enemyBoard.allShipsSunk();
+        }
+
+        public void incrementMoveCount() {
+            moveCount++;
+        }
+    }
+}
+
+----------------------------------------------
+final
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class BattleshipGUI extends JFrame {
+    private GameController gameController;
+    private JPanel playerPanel;
+    private JPanel enemyPanel;
+    private JLabel messageLabel;
+    private final int SIZE = 10;
+    private JButton[][] playerButtons;
+    private JButton[][] enemyButtons;
+
+    // Brute Force fields
+    private Timer bruteForceTimer;
+    private int currentRow = 0;
+    private int currentCol = 0;
+    private int bfMoveCount = 0;
+    private long bfStartTime = 0;
+    
+    // Probability Density fields
+    private Timer probabilityTimer;
+    private PDSearch pdSearch;  // inner class instance for PD mode
+    private long pdStartTime = 0;
+    
+    // Parity Search fields
+    private Timer parityTimer;
+    private ArrayList<int[]> parityCells;
+    private int parityIndex = 0;
+    private int parityMoveCount = 0;
+    private long parityStartTime = 0;
+
+    private void startBruteForce() {
+        currentRow = 0;
+        currentCol = 0;
+        bfMoveCount = 0;
+        bfStartTime = System.nanoTime();
+    
+        if (bruteForceTimer != null && bruteForceTimer.isRunning()) {
+            bruteForceTimer.stop();
+        }
+    
+        updateStatsLabel(bfMoveCount, "Brute force search started...");
+        bruteForceTimer = new Timer(500, e -> doOneBruteForceStep());
+        bruteForceTimer.start();
+    }
+    
+    
+    public BattleshipGUI() {
+        gameController = new GameController();
+        setTitle("Battleship Game");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        
+        // Top panel with message and algorithm buttons
+        JPanel topPanel = new JPanel(new BorderLayout());
+        messageLabel = new JLabel("Choose an algorithm to start the search.", SwingConstants.CENTER);
+        topPanel.add(messageLabel, BorderLayout.CENTER);
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout());
+        JButton startBFBtn = new JButton("Start Brute Force (with Target)");
+        startBFBtn.addActionListener(e -> startBruteForce());
+        buttonPanel.add(startBFBtn);
+        JButton startPDBtn = new JButton("Start Probability Density");
+        startPDBtn.addActionListener(e -> startProbabilityDensity());
+        buttonPanel.add(startPDBtn);
+        JButton startParityBtn = new JButton("Start Parity Search (with Target)");
+        startParityBtn.addActionListener(e -> startParitySearch());
+        buttonPanel.add(startParityBtn);
+        topPanel.add(buttonPanel, BorderLayout.EAST);
+        add(topPanel, BorderLayout.NORTH);
+        
+        // Panels for boards
+        JPanel boardsPanel = new JPanel(new GridLayout(1, 2));
+        playerPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        enemyPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        playerButtons = new JButton[SIZE][SIZE];
+        enemyButtons = new JButton[SIZE][SIZE];
+        
+        // Initialize player's board
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton();
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                button.setEnabled(false);
+                button.setText(String.valueOf(gameController.getPlayerBoard().getBoard()[i][j]));
+                playerButtons[i][j] = button;
+                playerPanel.add(button);
+            }
+        }
+        
+        // Initialize enemy board
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                JButton button = new JButton("-");
+                button.setPreferredSize(new Dimension(40, 40));
+                button.setMargin(new Insets(0, 0, 0, 0));
+                enemyButtons[i][j] = button;
+                enemyPanel.add(button);
+            }
+        }
+        
+        boardsPanel.add(playerPanel);
+        boardsPanel.add(enemyPanel);
+        add(boardsPanel, BorderLayout.CENTER);
+        
+        pack();
+        setLocationRelativeTo(null);
+        setVisible(true);
+    }
+    
+    // ----------------- Helper Method to Update Stats -----------------
+    private void updateStatsLabel(int moves, String prefix) {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        int hitCount = 0;
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] == 'X') {
+                    hitCount++;
+                }
+            }
+        }
+        int sunkCount = 0;
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (ship.isSunk()) {
+                sunkCount++;
+            }
+        }
+        messageLabel.setText("<html>" + prefix + "<br/>Moves : " + moves + "    Hit : " + hitCount + "    Sunk : " + sunkCount + "</html>");
+    }
+    
+    // ----------------- Utility Method: Convert Position -----------------
+    private int[] convertPosition(String position) {
+        if (position.length() < 2) return null;
+        char column = position.toUpperCase().charAt(0);
+        int row;
+        try {
+            row = Integer.parseInt(position.substring(1)) - 1;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        int col = column - 'A';
+        if (row < 0 || row >= SIZE || col < 0 || col >= SIZE) return null;
+        return new int[]{row, col};
+    }
+    
+    // ----------------- TARGET MODE Logic (Shared by all search modes) -----------------
+    
+    // Check target mode based on unsunk ships having recorded hits.
+    private boolean isTargetModeActive() {
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (!ship.isSunk() && !ship.getHitPositions().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    // Target move: For each unsunk ship with hits, determine orientation and fire at an adjacent cell.
+    private void doTargetStep() {
+        for (Ship ship : gameController.getEnemyBoard().getShips()) {
+            if (ship.isSunk() || ship.getHitPositions().isEmpty()) {
+                continue;
+            }
+            List<int[]> hitCoords = new ArrayList<>();
+            for (String pos : ship.getHitPositions()) {
+                int[] coord = convertPosition(pos);
+                if (coord != null) {
+                    hitCoords.add(coord);
+                }
+            }
+            if (hitCoords.isEmpty()) continue;
+            
+            int targetRow = -1, targetCol = -1;
+            char[][] board = gameController.getEnemyBoard().getBoard();
+            // If only one hit, check all four directions.
+            if (hitCoords.size() == 1) {
+                int r = hitCoords.get(0)[0], c = hitCoords.get(0)[1];
+                int[][] directions = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+                for (int[] d : directions) {
+                    int nr = r + d[0], nc = c + d[1];
+                    if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE) {
+                        if (board[nr][nc] == '-' || board[nr][nc] == 'S') {
+                            targetRow = nr;
+                            targetCol = nc;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Multiple hits: determine orientation.
+                boolean horizontal = true, vertical = true;
+                int baseRow = hitCoords.get(0)[0];
+                int baseCol = hitCoords.get(0)[1];
+                for (int[] coord : hitCoords) {
+                    if (coord[0] != baseRow)
+                        horizontal = false;
+                    if (coord[1] != baseCol)
+                        vertical = false;
+                }
+                if (horizontal && !vertical) {
+                    int minCol = SIZE, maxCol = -1;
+                    for (int[] coord : hitCoords) {
+                        minCol = Math.min(minCol, coord[1]);
+                        maxCol = Math.max(maxCol, coord[1]);
+                    }
+                    if (minCol - 1 >= 0 && (board[baseRow][minCol - 1] == '-' || board[baseRow][minCol - 1] == 'S')) {
+                        targetRow = baseRow;
+                        targetCol = minCol - 1;
+                    } else if (maxCol + 1 < SIZE && (board[baseRow][maxCol + 1] == '-' || board[baseRow][maxCol + 1] == 'S')) {
+                        targetRow = baseRow;
+                        targetCol = maxCol + 1;
+                    }
+                } else if (vertical && !horizontal) {
+                    int minRow = SIZE, maxRow = -1;
+                    for (int[] coord : hitCoords) {
+                        minRow = Math.min(minRow, coord[0]);
+                        maxRow = Math.max(maxRow, coord[0]);
+                    }
+                    if (minRow - 1 >= 0 && (board[minRow - 1][baseCol] == '-' || board[minRow - 1][baseCol] == 'S')) {
+                        targetRow = minRow - 1;
+                        targetCol = baseCol;
+                    } else if (maxRow + 1 < SIZE && (board[maxRow + 1][baseCol] == '-' || board[maxRow + 1][baseCol] == 'S')) {
+                        targetRow = maxRow + 1;
+                        targetCol = baseCol;
+                    }
+                } else {
+                    // Not clearly aligned: fallback to adjacent cells of the first hit.
+                    int r = hitCoords.get(0)[0], c = hitCoords.get(0)[1];
+                    int[][] directions = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+                    for (int[] d : directions) {
+                        int nr = r + d[0], nc = c + d[1];
+                        if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE) {
+                            if (board[nr][nc] == '-' || board[nr][nc] == 'S') {
+                                targetRow = nr;
+                                targetCol = nc;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (targetRow != -1 && targetCol != -1) {
+                String pos = "" + (char)('A' + targetCol) + (targetRow + 1);
+                String result = gameController.getEnemyBoard().attackPosition(pos);
+                bfMoveCount++;  // or pdSearch.incrementMoveCount() if in PD mode; here we assume shared target logic
+                updateEnemyBoard();
+                updateStatsLabel(bfMoveCount, "Target Mode: Attacking " + pos + ": " + result);
+                return;
+            }
+        }
+    }
+    
+    // ----------------- BRUTE FORCE (with Target Mode) -----------------
+    private void doOneBruteForceStep() {
+        if (gameController.getEnemyBoard().allShipsSunk()) {
+            bruteForceTimer.stop();
+            long elapsedTime = System.nanoTime() - bfStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(bfMoveCount, "Brute force finished! Time: " + ms + " ms (" + s + " s).");
+            return;
+        }
+        if (isTargetModeActive()) {
+            doTargetStep();
+            return;
+        }
+        if (currentRow >= SIZE) {
+            bruteForceTimer.stop();
+            long elapsedTime = System.nanoTime() - bfStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(bfMoveCount, "Brute force finished all cells! Time: " + ms + " ms (" + s + " s).");
+            return;
+        }
+        String pos = "" + (char)('A' + currentCol) + (currentRow + 1);
+        String result = gameController.getEnemyBoard().attackPosition(pos);
+        if (!result.equals("Position already attacked!")) {
+            bfMoveCount++;
+        }
+        updateEnemyBoard();
+        updateStatsLabel(bfMoveCount, "Brute Force: Attacking " + pos + ": " + result);
+        if (gameController.getEnemyBoard().allShipsSunk()) {
+            bruteForceTimer.stop();
+            long elapsedTime = System.nanoTime() - bfStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(bfMoveCount, "All enemy ships sunk by brute force at " + pos + "! Time: " + ms + " ms (" + s + " s).");
+            return;
+        }
+        currentCol++;
+        if (currentCol >= SIZE) {
+            currentCol = 0;
+            currentRow++;
+        }
+    }
+    
+    // ----------------- PROBABILITY DENSITY METHODS -----------------
+    private void startProbabilityDensity() {
+        pdSearch = new PDSearch(gameController.getEnemyBoard());
+        pdStartTime = System.nanoTime();
+        
+        if (probabilityTimer != null && probabilityTimer.isRunning()) {
+            probabilityTimer.stop();
+        }
+        updateStatsLabel(0, "Probability Density search started...");
+        probabilityTimer = new Timer(500, e -> doOneProbabilityStep());
+        probabilityTimer.start();
+    }
+    
+    private void doOneProbabilityStep() {
+        if (gameController.getEnemyBoard().allShipsSunk()) {
+            probabilityTimer.stop();
+            long elapsedTime = System.nanoTime() - pdStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(pdSearch.getMoveCount(), "Probability Density sunk all ships! Time: " + ms + " ms (" + s + " s).");
+            return;
+        }
+        if (isTargetModeActive()) {
+            doTargetStep();
+            return;
+        }
+        String result = pdSearch.doOneStep();
+        if (result.equals("No valid moves!")) {
+            probabilityTimer.stop();
+            updateStatsLabel(pdSearch.getMoveCount(), "Probability Density: " + result);
+            return;
+        }
+        updateEnemyBoard();
+        updateStatsLabel(pdSearch.getMoveCount(), "Probability: " + result + " (Move: " + pdSearch.getMoveCount() + ")");
+    }
+    
+    // ----------------- PARITY SEARCH (with Target Mode) -----------------
+    private void startParitySearch() {
+        parityCells = new ArrayList<>();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if ((i + j) % 2 == 0) {
+                    parityCells.add(new int[]{i, j});
+                }
+            }
+        }
+        parityIndex = 0;
+        parityMoveCount = 0;
+        parityStartTime = System.nanoTime();
+        if (parityTimer != null && parityTimer.isRunning()) {
+            parityTimer.stop();
+        }
+        updateStatsLabel(parityMoveCount, "Parity search started...");
+        parityTimer = new Timer(500, e -> doOneParityStep());
+        parityTimer.start();
+    }
+    
+    private void doOneParityStep() {
+        if (gameController.getEnemyBoard().allShipsSunk()) {
+            parityTimer.stop();
+            long elapsedTime = System.nanoTime() - parityStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(parityMoveCount, "All enemy ships sunk by parity search! Time: " + ms + " ms (" + s + " s).");
+            return;
+        }
+        if (isTargetModeActive()) {
+            doTargetStep();
+            return;
+        }
+        if (parityIndex < parityCells.size()) {
+            int[] coords = parityCells.get(parityIndex);
+            parityIndex++;
+            String pos = "" + (char)('A' + coords[1]) + (coords[0] + 1);
+            String result = gameController.getEnemyBoard().attackPosition(pos);
+            if (!result.equals("Position already attacked!")) {
+                parityMoveCount++;
+            }
+            updateEnemyBoard();
+            updateStatsLabel(parityMoveCount, "Parity: Attacking " + pos + ": " + result);
+        } else {
+            parityTimer.stop();
+            long elapsedTime = System.nanoTime() - parityStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(parityMoveCount, "Parity search finished! Time: " + ms + " ms (" + s + " s).");
+        }
+    }
+    
+    // ----------------- Inner Class for Probability Density Search -----------------
+    private class PDSearch {
+        private GameBoard enemyBoard;
+        private int SIZE;
+        private int moveCount;
+        private int[][] probabilityGrid;
+
+        public PDSearch(GameBoard enemyBoard) {
+            this.enemyBoard = enemyBoard;
+            this.SIZE = enemyBoard.getRows();
+            this.probabilityGrid = new int[SIZE][SIZE];
+            this.moveCount = 0;
+        }
+        
+        private boolean isCellAvailable(int row, int col, char[][] board) {
+            char cell = board[row][col];
+            return (cell == '-' || cell == 'S' || cell == 'X');
+        }
+        
+        private boolean canPlaceHorizontally(int row, int col, int shipLength, char[][] board) {
+            if (col + shipLength > SIZE) return false;
+            for (int j = col; j < col + shipLength; j++) {
+                if (!isCellAvailable(row, j, board)) return false;
+            }
+            return true;
+        }
+        
+        private boolean canPlaceVertically(int row, int col, int shipLength, char[][] board) {
+            if (row + shipLength > SIZE) return false;
+            for (int i = row; i < row + shipLength; i++) {
+                if (!isCellAvailable(i, col, board)) return false;
+            }
+            return true;
+        }
+        
+        private void computeProbabilityGrid() {
+            for (int i = 0; i < SIZE; i++) {
+                Arrays.fill(probabilityGrid[i], 0);
+            }
+            char[][] board = enemyBoard.getBoard();
+            for (Ship ship : enemyBoard.getShips()) {
+                if (ship.isSunk()) continue;
+                int shipLength = ship.getSize();
+                for (int i = 0; i < SIZE; i++) {
+                    for (int j = 0; j < SIZE; j++) {
+                        if (canPlaceHorizontally(i, j, shipLength, board)) {
+                            for (int j2 = j; j2 < j + shipLength; j2++) {
+                                probabilityGrid[i][j2]++;
+                            }
+                        }
+                        if (canPlaceVertically(i, j, shipLength, board)) {
+                            for (int i2 = i; i2 < i + shipLength; i2++) {
+                                probabilityGrid[i2][j]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        private int[] getBestCell() {
+            computeProbabilityGrid();
+            int bestRow = -1;
+            int bestCol = -1;
+            int maxProb = -1;
+            char[][] board = enemyBoard.getBoard();
+            for (int i = 0; i < SIZE; i++) {
+                for (int j = 0; j < SIZE; j++) {
+                    if (!(board[i][j] == '-' || board[i][j] == 'S' || board[i][j] == 'X')) continue;
+                    if (probabilityGrid[i][j] > maxProb) {
+                        maxProb = probabilityGrid[i][j];
+                        bestRow = i;
+                        bestCol = j;
+                    }
+                }
+            }
+            return new int[]{bestRow, bestCol};
+        }
+        
+        public String doOneStep() {
+            int[] best = getBestCell();
+            int row = best[0];
+            int col = best[1];
+            if (row == -1 || col == -1) {
+                return "No valid moves!";
+            }
+            String pos = "" + (char)('A' + col) + (row + 1);
+            String result = enemyBoard.attackPosition(pos);
+            moveCount++;
+            return "Attacking " + pos + ": " + result;
+        }
+        
+        public int getMoveCount() {
+            return moveCount;
+        }
+        
+        public boolean isSearchComplete() {
+            return enemyBoard.allShipsSunk();
+        }
+    }
+    
+    // ----------------- Helper Method to Update Enemy Board Display -----------------
+    private void updateEnemyBoard() {
+        char[][] board = gameController.getEnemyBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                char cell = board[i][j];
+                if (cell == 'X' || cell == 'M') {
+                    enemyButtons[i][j].setText(String.valueOf(cell));
+                } else {
+                    enemyButtons[i][j].setText("-");
+                }
+            }
+        }
+    }
+    
+    // (Optional) Update player's board if needed.
+    private void updatePlayerBoard() {
+        char[][] board = gameController.getPlayerBoard().getBoard();
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                playerButtons[i][j].setText(String.valueOf(board[i][j]));
+            }
+        }
+    }
+    
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new BattleshipGUI());
+    }
+}
+
+
+-----------------------------------------------------------
+FINAL gameController
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Random;
+
+public class GameController {
+    private GameBoard playerBoard; // Human player's board
+    private GameBoard enemyBoard;  // Computer's board
+    private Random random;
+
+    public GameController() {
+        playerBoard = new GameBoard(10, 10);
+        enemyBoard = new GameBoard(10, 10);
+        random = new Random();
+        autoSetupPhase();
+    }
+
+    // Automatically place ships on both boards using fixed positions.
+    private void autoSetupPhase() {
+        // For player's board:
+        List<String> pBattleship = Arrays.asList("A1", "A2", "A3", "A4");
+        List<String> pDestroyer = Arrays.asList("C1", "C2", "C3");
+        List<String> pSubmarine = Arrays.asList("E1", "E2");
+        playerBoard.placeShip(new Battleship(), pBattleship);
+        playerBoard.placeShip(new Destroyer(), pDestroyer);
+        playerBoard.placeShip(new Submarine(), pSubmarine);
+        
+        // For enemy (computer) board:
+        List<String> eBattleship = Arrays.asList("J7", "J8", "J9", "J10");
+        List<String> eDestroyer = Arrays.asList("F5", "F6", "F7");
+        List<String> eSubmarine = Arrays.asList("H3", "H4");
+        enemyBoard.placeShip(new Battleship(), eBattleship);
+        enemyBoard.placeShip(new Destroyer(), eDestroyer);
+        enemyBoard.placeShip(new Submarine(), eSubmarine);
+    }
+
+    // Process the player's attack on the enemy board.
+    public String playerAttack(String position) {
+        return enemyBoard.attackPosition(position);
+    }
+
+    // The computer selects a random available position on the player's board and attacks.
+    public String computerAttack() {
+        List<String> availablePositions = new ArrayList<>();
+        for (int row = 0; row < playerBoard.getRows(); row++) {
+            for (int col = 0; col < playerBoard.getCols(); col++) {
+                char cell = playerBoard.getBoard()[row][col];
+                if (cell != 'X' && cell != 'M') {
+                    String pos = "" + (char)('A' + col) + (row + 1);
+                    availablePositions.add(pos);
+                }
+            }
+        }
+        if (availablePositions.isEmpty()) return "No available moves!";
+        String pos = availablePositions.get(random.nextInt(availablePositions.size()));
+        String result = playerBoard.attackPosition(pos);
+        System.out.println("Computer attacks " + pos + ": " + result);
+        return result;
+    }
+
+    public GameBoard getPlayerBoard() {
+        return playerBoard;
+    }
+
+    public GameBoard getEnemyBoard() {
+        return enemyBoard;
+    }
+    
+    // Checks whether either side has lost all ships.
+    public boolean isGameOver() {
+        return playerBoard.allShipsSunk() || enemyBoard.allShipsSunk();
+    }
+
+    public long runBruteForceSearchOnEnemyBoard() {
+        long startTime = System.nanoTime();
+        int moves = 0;
+        
+        // Iterate systematically through each cell on the enemy board.
+        for (int row = 0; row < enemyBoard.getRows(); row++) {
+            for (int col = 0; col < enemyBoard.getCols(); col++) {
+                // Create a position string from row/col (e.g., "A1")
+                String pos = "" + (char)('A' + col) + (row + 1);
+                
+                // Attack this position on the enemy board.
+                String result = enemyBoard.attackPosition(pos);
+                moves++;
+                
+                // Update and display stats after each move.
+                enemyBoard.displayBoardWithStats(true, moves);
+                
+                // Sleep for 200 ms so updates are visible step-by-step.
+                try {
+                    Thread.sleep(200); // adjust delay as needed
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                
+                // Check if all enemy ships have been sunk.
+                if (enemyBoard.allShipsSunk()) {
+                    long elapsedTime = System.nanoTime() - startTime;
+                    System.out.println("Brute force search finished in " + moves + " moves, taking " 
+                                       + (elapsedTime / 1_000_000.0) + " ms.");
+                    return elapsedTime;
+                }
+            }
+        }
+        long elapsedTime = System.nanoTime() - startTime;
+        System.out.println("Brute force search finished in " + moves + " moves, taking " 
+                           + (elapsedTime / 1_000_000.0) + " ms.");
+        return elapsedTime;
+    }
+    
+    
+}
+
