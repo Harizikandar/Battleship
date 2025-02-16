@@ -336,59 +336,53 @@ public class BattleshipGUI extends JFrame {
     
     // ----------------- BRUTE FORCE (with Target Mode) -----------------
     private void doOneBruteForceStep() {
-        // Check if all ships are sunk
+        // 1) Check if game is over
         if (gameController.getEnemyBoard().allShipsSunk()) {
-            endBruteForceSearch("All enemy ships sunk!");
+            bruteForceTimer.stop();
+            long elapsedTime = System.nanoTime() - bfStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(bfMoveCount, "Brute force finished! Time: " + ms + " ms (" + s + " s).");
             return;
         }
-    
-        // Check if target mode is active (when a ship has been hit but not sunk)
-        if (isTargetModeActive()) {
-            doTargetStep();
-            return;
-        }
-    
-        // Check if we've searched the entire grid
-        if (currentRow >= SIZE) {
-            endBruteForceSearch("Searched all positions");
-            return;
-        }
-    
-        // Get current position and check if it's already been attacked
-        String pos = "" + (char)('A' + currentCol) + (currentRow + 1);
-        char currentCell = gameController.getEnemyBoard().getBoard()[currentRow][currentCol];
         
-        // If position hasn't been attacked yet
-        if (currentCell != 'X' && currentCell != 'M') {
-            // Attack the position
-            String result = gameController.getEnemyBoard().attackPosition(pos);
-            bfMoveCount++;
-            updateEnemyBoard();
-            updateStatsLabel(bfMoveCount, "Brute Force: Attacking " + pos + ": " + result);
-    
-            // Check if this attack won the game
-            if (gameController.getEnemyBoard().allShipsSunk()) {
-                long elapsedTime = System.nanoTime() - bfStartTime;
-                double ms = elapsedTime / 1_000_000.0;
-                double s = ms / 1000.0;
-                updateStatsLabel(bfMoveCount, "All enemy ships sunk by brute force at " + pos + "! Time: " + ms + " ms (" + s + " s).");
-                bruteForceTimer.stop();
-                return;
-            }
+        // 2) If we've scanned all cells, stop brute force
+        if (currentRow >= SIZE) {
+            bruteForceTimer.stop();
+            long elapsedTime = System.nanoTime() - bfStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(bfMoveCount, "Brute force finished all cells! Time: " + ms + " ms (" + s + " s).");
+            return;
         }
-    
-        // Move to next position
+        
+        // 3) Systematically attack the next cell without checking target mode.
+        String pos = "" + (char)('A' + currentCol) + (currentRow + 1);
+        String result = gameController.getEnemyBoard().attackPosition(pos);
+        if (!result.equals("Position already attacked!")) {
+            bfMoveCount++;
+        }
+        updateEnemyBoard();
+        updateStatsLabel(bfMoveCount, "Brute Force: Attacking " + pos + ": " + result);
+        
+        // 4) Check again if all ships are sunk after the move.
+        if (gameController.getEnemyBoard().allShipsSunk()) {
+            bruteForceTimer.stop();
+            long elapsedTime = System.nanoTime() - bfStartTime;
+            double ms = elapsedTime / 1_000_000.0;
+            double s = ms / 1000.0;
+            updateStatsLabel(bfMoveCount, "All enemy ships sunk by brute force at " + pos + "! Time: " + ms + " ms (" + s + " s).");
+            return;
+        }
+        
+        // 5) Advance to the next cell.
         currentCol++;
         if (currentCol >= SIZE) {
             currentCol = 0;
             currentRow++;
         }
-    
-        // If we've completed the search without finding all ships
-        if (currentRow >= SIZE) {
-            endBruteForceSearch("Completed grid search without finding all ships");
-        }
     }
+    
 
     private void endBruteForceSearch(String reason) {
         bruteForceTimer.stop();
